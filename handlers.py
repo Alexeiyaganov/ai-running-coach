@@ -2,9 +2,12 @@ import json
 import logging
 from datetime import datetime, timedelta
 
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+from telebot.types import (
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    WebAppInfo,
+)
 
-from config import TELEGRAM_TOKEN
 from db import (
     ensure_user, save_training, get_diary_record, update_diary_record,
     delete_diary_record, get_diary, save_plan, get_plan_record,
@@ -18,6 +21,9 @@ from voice import transcribe_voice
 
 logger = logging.getLogger(__name__)
 
+# --- URL вашего Space ---
+SPACE_URL = "https://skienbear-ai-running-coach.hf.space"
+
 
 def register_handlers(bot):
 
@@ -29,20 +35,39 @@ def register_handlers(bot):
         )
         return kb
 
-    # --- Команды ---
+    def open_app_keyboard():
+        """Кнопка для открытия Mini App."""
+        kb = InlineKeyboardMarkup()
+        kb.add(InlineKeyboardButton(
+            "📊 Открыть план и дневник",
+            web_app=WebAppInfo(url=SPACE_URL),
+        ))
+        return kb
+
+    # --- /start ---
     @bot.message_handler(commands=["start"])
     def send_welcome(message):
         ensure_user(message.from_user.id, message.from_user.first_name)
         bot.reply_to(message,
             f"🏃 Привет, {message.from_user.first_name}!\n\n"
-            "Могу:\n"
+            "Что я умею:\n"
             "• Записать тренировку — «вчера пробежал 10 км»\n"
             "• Поправить запись — «на самом деле 12 км»\n"
-            "• Составить план — «составь план на месяц»\n"
-            "• Показать дневник — «что записал?»\n\n"
-            "Команды: /today /week /month /diary"
+            "• Составить план — «составь план на месяц»\n\n"
+            "Открой мини-приложение — там план, дневник и графики.",
+            reply_markup=open_app_keyboard(),
         )
 
+    # --- /app ---
+    @bot.message_handler(commands=["app"])
+    def cmd_app(message):
+        ensure_user(message.from_user.id, message.from_user.first_name)
+        bot.reply_to(message,
+            "📊 Открой мини-приложение:",
+            reply_markup=open_app_keyboard(),
+        )
+
+    # --- /today /week /month /diary (текстовые сводки) ---
     @bot.message_handler(commands=["today"])
     def cmd_today(message):
         ensure_user(message.from_user.id, message.from_user.first_name)
@@ -73,6 +98,7 @@ def register_handlers(bot):
             bot.reply_to(message, "😔 Ошибка обработки голоса.")
             return
         bot.reply_to(message, f"📝 Распознал: {text}")
+        set_last_action(message.from_user.id, "last_voice", 0, text)
         handle_incoming_text(message, text)
 
     # --- Текст ---
@@ -84,16 +110,45 @@ def register_handlers(bot):
     # --- Основная логика ---
     def handle_incoming_text(message, text):
         user_id = message.from_user.id
+        user_lower = text.lower().strip()
 
-        # 1. Извлекаем якорь
+        # Быстрые команды
+        if any(w in user_lower for w in [
+            "покажи дневник", "мой дневник", "дневник тренировок",
+            "покажи записи", "история тренировок",
+        ]):
+            bot.reply_to(message, get_diary(user_id))
+            return
+
+        if any(w in user_lower for w in [
+            "покажи план", "мой план", "покажи календарь",
+            "расписание тренировок", "что по плану",
+        ]):
+            bot.reply_to(message, get_plan_for_period(user_id, 14))
+            return
+
+        # Служебные фразы
+        service_phrases = {
+            "запиши в дневник", "запиши это", "запиши",
+            "подтверждаю", "подтвердить", "ок", "окей",
+            "да", "yes", "отмена", "отмени", "нет",
+        }
+        if user_lower in service_phrases:
+            pending = get_pending(user_id)
+            if pending:
+                bot.reply_to(message,
+                    "🤔 Есть незавершённое действие. Используй кнопки под предыдущим сообщением.")
+            else:
+                bot.reply_to(message, "🤔 Нечего записывать. Опиши тренировку.")
+            return
+
+        # Якорь → кандидаты → решение
         anchor = extract_anchor(text)
         logger.info(f"Anchor: {anchor}")
 
-        # 2. Ищем кандидатов
         candidates = find_candidates(user_id, anchor) if anchor else {"diary": [], "plan": []}
         logger.info(f"Candidates: diary={len(candidates['diary'])}, plan={len(candidates['plan'])}")
 
-        # 3. Определяем действие
         last_action = get_last_action(user_id)
         decision = decide_action(text, anchor, candidates, last_action)
         logger.info(f"Decision: {decision}")
@@ -105,7 +160,6 @@ def register_handlers(bot):
         action = decision.get("action")
         confidence = decision.get("confidence", 0)
 
-        # 4. Если неуверен — спрашиваем с кнопками
         if decision.get("needs_clarification") or confidence < 0.6:
             question = decision.get("clarification_question") or "Уточни, о какой тренировке речь?"
             all_candidates = candidates["diary"] + candidates["plan"]
@@ -116,13 +170,15 @@ def register_handlers(bot):
                         label = f"📝 {cand['date']} {cand['raw_text'][:30]}"
                     else:
                         label = f"📅 {cand['date']} {cand.get('type', '')}"
-                    kb.add(InlineKeyboardButton(label, callback_data=f"pick_{cand['source']}_{cand['id']}"))
+                    kb.add(InlineKeyboardButton(
+                        label,
+                        callback_data=f"pick_{cand['source']}_{cand['id']}"
+                    ))
                 bot.reply_to(message, f"🤔 {question}", reply_markup=kb)
             else:
                 bot.reply_to(message, f"🤔 {question}")
             return
 
-        # 5. Выполняем
         if action == "create_diary":
             do_create_diary(message, text)
         elif action == "update_diary":
@@ -153,7 +209,8 @@ def register_handlers(bot):
         if not structured:
             bot.reply_to(message, "😔 Не разобрал тренировку.")
             return
-        save_pending(message.from_user.id, "log_training", {"structured": structured, "raw_text": text})
+        save_pending(message.from_user.id, "log_training",
+                     {"structured": structured, "raw_text": text})
         preview = json.dumps(structured, ensure_ascii=False, indent=2)
         bot.reply_to(message, f"📝 Новая тренировка:\n{preview}\n\nЗаписать?",
                      reply_markup=confirmation_keyboard())
@@ -170,7 +227,7 @@ def register_handlers(bot):
         update_prompt = f"""
         Есть запись о тренировке: {json.dumps(original, ensure_ascii=False)}
         Пользователь правит: "{text}"
-        Верни ТОЛЬКО JSON с полями, которые надо обновить (только изменяемое):
+        Верни ТОЛЬКО JSON с полями, которые надо обновить:
         {{"date": ..., "type": ..., "distance_km": ..., "duration_min": ..., "elevation_m": ..., "feeling": ..., "notes": ...}}
         """
         updated = parse_json_safe(ask_llm(update_prompt, "Только JSON.")) or {}
@@ -216,7 +273,8 @@ def register_handlers(bot):
         summary = "📋 План сохранён:\n\n"
         for item in items:
             summary += f"📅 {item.get('date')}: {item.get('type')} — {item.get('description')}\n"
-        bot.reply_to(message, summary)
+        bot.reply_to(message, summary,
+                     reply_markup=open_app_keyboard())
 
     def do_update_plan(message, text, target_id):
         if not target_id:
@@ -244,6 +302,16 @@ def register_handlers(bot):
         user_id = call.from_user.id
         ensure_user(user_id, call.from_user.first_name)
 
+        if call.data == "show_plan":
+            bot.answer_callback_query(call.id)
+            bot.send_message(call.message.chat.id, get_plan_for_period(user_id, 14))
+            return
+
+        if call.data == "show_diary":
+            bot.answer_callback_query(call.id)
+            bot.send_message(call.message.chat.id, get_diary(user_id))
+            return
+
         if call.data == "confirm":
             pending = get_pending(user_id)
             if not pending:
@@ -259,7 +327,8 @@ def register_handlers(bot):
                 elif action == "edit_training":
                     update_diary_record(payload["record_id"], user_id,
                                         payload["structured"], payload["raw_text"])
-                    set_last_action(user_id, "log_training", payload["record_id"], payload["raw_text"])
+                    set_last_action(user_id, "log_training",
+                                    payload["record_id"], payload["raw_text"])
                     msg = "✏️ Обновил запись."
                 elif action == "delete_training":
                     delete_diary_record(payload["record_id"], user_id)
@@ -276,28 +345,15 @@ def register_handlers(bot):
                 bot.edit_message_text(msg, call.message.chat.id, call.message.message_id)
             except Exception as e:
                 logger.error(f"Confirm error: {e}")
-                bot.edit_message_text(f"😔 Ошибка: {e}", call.message.chat.id, call.message.message_id)
+                bot.edit_message_text(f"😔 Ошибка: {e}",
+                                      call.message.chat.id, call.message.message_id)
 
         elif call.data == "cancel":
             clear_pending(user_id)
-            bot.edit_message_text("❌ Отменено.", call.message.chat.id, call.message.message_id)
+            bot.edit_message_text("❌ Отменено.",
+                                  call.message.chat.id, call.message.message_id)
 
         elif call.data.startswith("pick_"):
-            _, source, rec_id = call.data.split("_")
-            rec_id = int(rec_id)
-            if source == "diary":
-                rec = get_diary_record(rec_id, user_id)
-                if rec:
-                    bot.edit_message_text(
-                        f"Выбрана запись от {rec['date']}:\n{rec['raw_text']}\n\n"
-                        f"Что с ней сделать? Напиши: «удали», «поправь на 12 км» и т.д.",
-                        call.message.chat.id, call.message.message_id,
-                    )
-            else:
-                rec = get_plan_record(rec_id, user_id)
-                if rec:
-                    bot.edit_message_text(
-                        f"Выбрана тренировка в плане {rec['date']}:\n{rec['type']} — {rec['description']}\n\n"
-                        f"Что с ней сделать?",
-                        call.message.chat.id, call.message.message_id,
-                    )
+            bot.answer_callback_query(call.id)
+            bot.send_message(call.message.chat.id,
+                "Напиши, что сделать с этой тренировкой: «удали», «поправь на 12 км» и т.д.")

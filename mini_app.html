@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI Тренер</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--tg-theme-bg-color, #fff);
+      color: var(--tg-theme-text-color, #000);
+      padding: 16px;
+      padding-bottom: 40px;
+    }
+    h1 { font-size: 22px; margin-bottom: 16px; }
+    h2 { font-size: 17px; margin: 20px 0 10px; color: #666; }
+    .tabs {
+      display: flex; gap: 8px; margin-bottom: 16px;
+      position: sticky; top: 0;
+      background: var(--tg-theme-bg-color, #fff);
+      padding: 8px 0; z-index: 10;
+    }
+    .tab {
+      flex: 1; padding: 10px; border-radius: 10px; text-align: center;
+      background: #f0f0f0; cursor: pointer; font-weight: 500;
+      user-select: none;
+    }
+    .tab.active { background: #2481cc; color: #fff; }
+    .card {
+      background: #f8f8f8; border-radius: 12px; padding: 14px;
+      margin-bottom: 10px; border-left: 4px solid #2481cc;
+    }
+    .card.completed { border-left-color: #4caf50; opacity: 0.7; }
+    .card.skipped { border-left-color: #e53935; opacity: 0.7; }
+    .card-date { font-size: 13px; color: #888; margin-bottom: 6px; }
+    .card-title { font-size: 16px; font-weight: 600; margin-bottom: 4px; }
+    .card-desc { font-size: 14px; color: #555; }
+    .card-meta { font-size: 13px; color: #2481cc; margin-top: 6px; }
+    .empty, .loading { text-align: center; color: #999; padding: 40px 0; }
+    .chart-container {
+      background: #f8f8f8; border-radius: 12px; padding: 16px;
+      margin-bottom: 16px;
+    }
+    canvas { max-height: 240px; }
+  </style>
+</head>
+<body>
+  <h1>🏃 AI Тренер</h1>
+
+  <div class="tabs">
+    <div class="tab active" data-tab="plan">📅 План</div>
+    <div class="tab" data-tab="diary">📖 Дневник</div>
+    <div class="tab" data-tab="stats">📊 Графики</div>
+  </div>
+
+  <div id="content" class="loading">Загрузка...</div>
+
+  <script>
+    const tg = window.Telegram.WebApp;
+    tg.ready();
+    tg.expand();
+
+    const userId = tg.initDataUnsafe?.user?.id;
+
+    if (!userId) {
+      document.getElementById('content').innerHTML =
+        '<div class="empty">Открой через Telegram-бота</div>';
+    }
+
+    let currentTab = 'plan';
+    let chart = null;
+
+    document.querySelectorAll('.tab').forEach(el => {
+      el.addEventListener('click', () => {
+        document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+        el.classList.add('active');
+        currentTab = el.dataset.tab;
+        load();
+      });
+    });
+
+    async function load() {
+      const el = document.getElementById('content');
+      el.innerHTML = '<div class="loading">Загрузка...</div>';
+
+      if (currentTab === 'plan') await loadPlan(el);
+      else if (currentTab === 'diary') await loadDiary(el);
+      else if (currentTab === 'stats') await loadStats(el);
+    }
+
+    async function loadPlan(el) {
+      const res = await fetch(`/api/plan/${userId}?days=14`);
+      const data = await res.json();
+      if (!data.length) {
+        el.innerHTML = '<div class="empty">План пуст</div>';
+        return;
+      }
+      el.innerHTML = data.map(item => `
+        <div class="card ${item.status}">
+          <div class="card-date">${item.date}</div>
+          <div class="card-title">${item.type || 'Тренировка'}</div>
+          <div class="card-desc">${item.description || ''}</div>
+          ${item.distance_km ? `<div class="card-meta">${item.distance_km} км</div>` : ''}
+          ${item.elevation_m ? `<div class="card-meta">+${item.elevation_m} м</div>` : ''}
+        </div>
+      `).join('');
+    }
+
+    async function loadDiary(el) {
+      const res = await fetch(`/api/diary/${userId}?limit=30`);
+      const data = await res.json();
+      if (!data.length) {
+        el.innerHTML = '<div class="empty">Дневник пуст</div>';
+        return;
+      }
+      el.innerHTML = data.map(item => {
+        const s = item.structured || {};
+        return `
+          <div class="card">
+            <div class="card-date">${item.date}</div>
+            <div class="card-title">${s.type || 'Тренировка'}</div>
+            <div class="card-desc">${item.raw_text}</div>
+            ${s.distance_km ? `<div class="card-meta">${s.distance_km} км</div>` : ''}
+            ${s.elevation_m ? `<div class="card-meta">+${s.elevation_m} м</div>` : ''}
+          </div>
+        `;
+      }).join('');
+    }
+
+    async function loadStats(el) {
+      const res = await fetch(`/api/stats/${userId}`);
+      const data = await res.json();
+
+      el.innerHTML = `
+        <div class="chart-container">
+          <h2>Объём по неделям (км)</h2>
+          <canvas id="volumeChart"></canvas>
+        </div>
+        <div class="chart-container">
+          <h2>Набор высоты по неделям (м)</h2>
+          <canvas id="elevChart"></canvas>
+        </div>
+      `;
+
+      if (chart) chart.destroy();
+
+      const ctx1 = document.getElementById('volumeChart').getContext('2d');
+      new Chart(ctx1, {
+        type: 'bar',
+        data: {
+          labels: data.weeks,
+          datasets: [{
+            label: 'км',
+            data: data.volume,
+            backgroundColor: '#2481cc',
+            borderRadius: 6,
+          }]
+        },
+        options: {
+          responsive: true,
+          plugins: { legend: { display: false } },
+          scales: { y: { beginAtZero: true } }
+        }
+      });
+
+      const ctx2 = document.getElementById('elevChart').getContext('2d');
+      new Chart(ctx2, {
+        type: 'bar',
+        data: {
+          labels: data.weeks,
+          datasets: [{
+            label: 'м',
+            data: data.elevation,
+            backgroundColor: '#4caf50',
+            borderRadius: 6,
+          }]
+        },
+        options: {
+          responsive: true,
+          plugins: { legend: { display: false } },
+          scales: { y: { beginAtZero: true } }
+        }
+      });
+    }
+
+    if (userId) load();
+  </script>
+</body>
+</html>
