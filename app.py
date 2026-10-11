@@ -62,14 +62,14 @@ def ask_llm(prompt, system_prompt=None):
     messages.append({"role": "user", "content": prompt})
     try:
         response = openrouter_client.chat.completions.create(
-            model="google/gemini-2.0-flash-001",
+            model="openrouter/free",
             messages=messages,
             temperature=0.7,
         )
         return response.choices[0].message.content
     except Exception as e:
         logger.error(f"LLM error: {e}")
-        return "😔 Модель временно недоступна, попробуй позже."
+        return f"😔 Ошибка модели: {e}"
 
 def parse_training_text(text):
     prompt = f"""
