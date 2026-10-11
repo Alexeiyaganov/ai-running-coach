@@ -1,13 +1,20 @@
 import os
 import logging
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime
 from threading import Thread
 
+import spaces
 import gradio as gr
 import telebot
 from groq import Groq
 from openai import OpenAI
+
+# --- Заглушка для ZeroGPU: не вызывается, нужна только чтобы Space запустился ---
+@spaces.GPU
+def dummy_gpu_check():
+    return "ok"
+# ------------------------------------------------------------------------------
 
 # --- Логирование ---
 logging.basicConfig(
@@ -47,7 +54,7 @@ def init_db():
 
 init_db()
 
-# --- Запрос к LLM ---
+# --- LLM ---
 def ask_llm(prompt, system_prompt=None):
     messages = []
     if system_prompt:
@@ -72,7 +79,7 @@ def parse_training_text(text):
     """
     return ask_llm(prompt, "Ты парсер спортивных данных, отвечай только JSON.")
 
-# --- Обработчики Telegram ---
+# --- Telegram ---
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     bot.reply_to(message,
@@ -134,12 +141,12 @@ def handle_text(message):
         conn.close()
         bot.reply_to(message, f"✅ Записал:\n{structured}")
 
-# --- Запуск бота в фоне ---
+# --- Фоновый запуск бота ---
 def run_bot():
     logger.info("Telegram бот запущен...")
     bot.infinity_polling(timeout=10, long_polling_timeout=5)
 
-# --- Gradio-заглушка (обязательна для Hugging Face) ---
+# --- Gradio-заглушка (обязательна для HF) ---
 def hello(name):
     return f"AI Running Coach работает. Привет, {name}!"
 
@@ -151,7 +158,7 @@ iface = gr.Interface(
     description="Telegram-бот работает в фоне. Общайся с ним в Telegram."
 )
 
-# --- Главный запуск ---
+# --- Запуск ---
 if __name__ == "__main__":
     t = Thread(target=run_bot)
     t.start()
