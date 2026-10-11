@@ -5,44 +5,47 @@ from threading import Thread
 from pathlib import Path
 
 import spaces
+import gradio as gr
 import telebot
-import uvicorn
-from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
-from fastapi.middleware.cors import CORSMiddleware
 
 from config import TELEGRAM_TOKEN
 from db import init_db, get_conn
 from handlers import register_handlers
 
 
-# --- Заглушка для ZeroGPU: не вызывается, нужна только чтобы Space запустился ---
+# --- Заглушка для ZeroGPU ---
 @spaces.GPU
 def dummy_gpu_check():
     return "ok"
-# ------------------------------------------------------------------------------
 
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI()
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 MINI_APP_PATH = Path(__file__).parent / "mini_app.html"
 
 
-@app.get("/", response_class=HTMLResponse)
-def mini_app():
+# --- Обычная Gradio-заглушка (HF ждёт Gradio SDK) ---
+def _stub(name):
+    return f"AI Coach работает. Привет, {name}!"
+
+
+iface = gr.Interface(
+    fn=_stub,
+    inputs="text",
+    outputs="text",
+    title="AI Running Coach",
+)
+
+
+# --- FastAPI-роуты добавляем прямо в Gradio app ---
+@iface.app.get("/miniapp", response_class=HTMLResponse)
+def miniapp_root():
     return MINI_APP_PATH.read_text(encoding="utf-8")
 
 
-@app.get("/api/plan/{user_id}")
+@iface.app.get("/api/plan/{user_id}")
 def api_plan(user_id: int, days: int = 14):
     today = datetime.now().date()
     end = today + timedelta(days=days)
@@ -64,7 +67,7 @@ def api_plan(user_id: int, days: int = 14):
     ])
 
 
-@app.get("/api/diary/{user_id}")
+@iface.app.get("/api/diary/{user_id}")
 def api_diary(user_id: int, limit: int = 30):
     conn = get_conn()
     c = conn.cursor()
@@ -82,11 +85,10 @@ def api_diary(user_id: int, limit: int = 30):
     ])
 
 
-@app.get("/api/stats/{user_id}")
+@iface.app.get("/api/stats/{user_id}")
 def api_stats(user_id: int, weeks: int = 8):
     today = datetime.now().date()
     start = today - timedelta(weeks=weeks)
-
     conn = get_conn()
     c = conn.cursor()
     c.execute("""
@@ -107,11 +109,9 @@ def api_stats(user_id: int, weeks: int = 8):
         if delta < 0:
             continue
         week_idx = delta // 7
-
         s = json.loads(struct) if struct else {}
         dist = s.get("distance_km") or 0
         elev = s.get("elevation_m") or 0
-
         if week_idx not in buckets:
             buckets[week_idx] = {"volume": 0, "elevation": 0}
         buckets[week_idx]["volume"] += dist
@@ -132,6 +132,7 @@ def api_stats(user_id: int, weeks: int = 8):
     })
 
 
+# --- Запуск бота в фоне ---
 def run_bot():
     bot = telebot.TeleBot(TELEGRAM_TOKEN, threaded=False)
     register_handlers(bot)
@@ -143,4 +144,5 @@ if __name__ == "__main__":
     init_db()
     t = Thread(target=run_bot)
     t.start()
-    uvicorn.run(app, host="0.0.0.0", port=7860)
+    # Gradio сам поднимет uvicorn на порту 7860
+    iface.launch(server_name="0.0.0.0", server_port=7860)
