@@ -1,0 +1,5 @@
+gradio
+pyTelegramBotAPI
+openai
+requests
+groq
