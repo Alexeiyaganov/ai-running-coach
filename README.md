@@ -3,8 +3,8 @@ title: AI Running Coach
 emoji: 🏃
 colorFrom: blue
 colorTo: green
-sdk: docker
-app_port: 7860
+sdk: gradio
+app_file: app.py
 pinned: false
 license: mit
 ---
