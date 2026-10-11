@@ -56,6 +56,7 @@ init_db()
 
 # --- LLM ---
 def ask_llm(prompt, system_prompt=None):
+    """Отправляет запрос в OpenRouter и возвращает ответ."""
     messages = []
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
@@ -71,7 +72,9 @@ def ask_llm(prompt, system_prompt=None):
         logger.error(f"LLM error: {e}")
         return f"😔 Ошибка модели: {e}"
 
+
 def parse_training_text(text):
+    """Извлекает структурированные данные о тренировке через LLM."""
     prompt = f"""
     Извлеки информацию о тренировке, верни ТОЛЬКО JSON:
     {{"date": "YYYY-MM-DD", "type": "тип", "distance_km": число, "duration_min": число, "elevation_m": число, "feeling": "оценка", "notes": "заметки"}}
@@ -79,14 +82,46 @@ def parse_training_text(text):
     """
     return ask_llm(prompt, "Ты парсер спортивных данных, отвечай только JSON.")
 
+
+def is_training_description(text):
+    """Спрашивает у модели, похоже ли сообщение на описание тренировки."""
+    prompt = f"""
+    Это описание тренировки? Ответь одним словом: "да" или "нет".
+    Текст: "{text}"
+    """
+    answer = ask_llm(prompt, "Отвечай только 'да' или 'нет'.").strip().lower()
+    return "да" in answer
+
+
+def show_diary(limit=10):
+    """Возвращает последние записи дневника в виде текста."""
+    conn = sqlite3.connect("training.db")
+    c = conn.cursor()
+    c.execute("SELECT date, raw_text FROM diary ORDER BY id DESC LIMIT ?", (limit,))
+    rows = c.fetchall()
+    conn.close()
+
+    if not rows:
+        return "📭 Дневник пуст."
+
+    result = "📖 Последние записи:\n\n"
+    for date, raw in rows:
+        result += f"📅 {date}\n{raw}\n\n"
+    return result
+
+
 # --- Telegram ---
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     bot.reply_to(message,
         "🏃 Привет! Я твой AI-тренер.\n\n"
-        "Напиши или наговори о тренировке. Например:\n"
-        "«Пробежал 10 км за 55 минут, набор 300 м, было тяжело»"
+        "Что я умею:\n"
+        "• Записать тренировку — «пробежал 10 км за час»\n"
+        "• Составить план — «составь план на месяц для трейла»\n"
+        "• Показать дневник — «что записал?»\n"
+        "• Ответить на вопрос — «как тренировать горки?»"
     )
+
 
 @bot.message_handler(content_types=['voice'])
 def handle_voice(message):
@@ -120,17 +155,42 @@ def handle_voice(message):
         logger.error(f"Voice error: {e}")
         bot.reply_to(message, "😔 Ошибка обработки голоса.")
 
+
 @bot.message_handler(func=lambda m: True)
 def handle_text(message):
     text = message.text
-    if any(w in text.lower() for w in ["план", "составь"]):
+    user_lower = text.lower()
+
+    # 1. Запрос плана
+    plan_keywords = ["план", "составь", "подготовь", "расписание", "программа"]
+    if any(w in user_lower for w in plan_keywords):
         bot.reply_to(message, "🤔 Составляю план...")
         plan = ask_llm(
-            f"Ты тренер по бегу, трейлу и ориентированию. Составь план на неделю: {text}",
+            f"Ты тренер по бегу, трейлу и ориентированию. Составь план тренировок: {text}",
             "Давай конкретные планы с дистанцией, интенсивностью и набором высоты."
         )
         bot.reply_to(message, f"📋 План:\n\n{plan}")
-    else:
+        return
+
+    # 2. Вопрос про дневник
+    diary_keywords = ["что записал", "дневник", "покажи", "история", "мои тренировки"]
+    if any(w in user_lower for w in diary_keywords):
+        bot.reply_to(message, show_diary())
+        return
+
+    # 3. Приветствие / болтовня
+    chat_keywords = ["привет", "как дела", "помощь", "help", "что умеешь"]
+    if any(w in user_lower for w in chat_keywords):
+        bot.reply_to(message,
+            "🏃 Я твой AI-тренер. Могу:\n\n"
+            "• Записать тренировку — «пробежал 10 км за час»\n"
+            "• Составить план — «составь план на месяц для трейла»\n"
+            "• Показать дневник — «что записал?»"
+        )
+        return
+
+    # 4. Всё остальное — проверяем, тренировка ли это
+    if is_training_description(text):
         bot.reply_to(message, "📝 Записываю...")
         structured = parse_training_text(text)
         conn = sqlite3.connect("training.db")
@@ -140,15 +200,25 @@ def handle_text(message):
         conn.commit()
         conn.close()
         bot.reply_to(message, f"✅ Записал:\n{structured}")
+    else:
+        # Не тренировка — отвечаем как тренер
+        reply = ask_llm(
+            text,
+            "Ты AI-тренер по бегу, трейлу и ориентированию. Отвечай коротко и по делу."
+        )
+        bot.reply_to(message, reply)
+
 
 # --- Фоновый запуск бота ---
 def run_bot():
     logger.info("Telegram бот запущен...")
     bot.infinity_polling(timeout=10, long_polling_timeout=5)
 
+
 # --- Gradio-заглушка (обязательна для HF) ---
 def hello(name):
     return f"AI Running Coach работает. Привет, {name}!"
+
 
 iface = gr.Interface(
     fn=hello,
@@ -157,6 +227,7 @@ iface = gr.Interface(
     title="AI Running Coach",
     description="Telegram-бот работает в фоне. Общайся с ним в Telegram."
 )
+
 
 # --- Запуск ---
 if __name__ == "__main__":
