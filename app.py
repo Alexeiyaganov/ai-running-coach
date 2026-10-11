@@ -16,9 +16,11 @@ from db import init_db, get_conn
 from handlers import register_handlers
 
 
+# --- Заглушка для ZeroGPU: не вызывается, нужна только чтобы Space запустился ---
 @spaces.GPU
 def dummy_gpu_check():
     return "ok"
+# ------------------------------------------------------------------------------
 
 
 logging.basicConfig(level=logging.INFO)
@@ -82,7 +84,6 @@ def api_diary(user_id: int, limit: int = 30):
 
 @app.get("/api/stats/{user_id}")
 def api_stats(user_id: int, weeks: int = 8):
-    """Агрегирует дневник по неделям: объём и набор высоты."""
     today = datetime.now().date()
     start = today - timedelta(weeks=weeks)
 
@@ -96,14 +97,12 @@ def api_stats(user_id: int, weeks: int = 8):
     rows = c.fetchall()
     conn.close()
 
-    # Собираем данные по неделям
     buckets = {}
     for date_str, struct in rows:
         try:
             d = datetime.fromisoformat(date_str).date()
         except Exception:
             continue
-        # Номер недели от start
         delta = (d - start).days
         if delta < 0:
             continue
@@ -118,9 +117,7 @@ def api_stats(user_id: int, weeks: int = 8):
         buckets[week_idx]["volume"] += dist
         buckets[week_idx]["elevation"] += elev
 
-    labels = []
-    volume = []
-    elevation = []
+    labels, volume, elevation = [], [], []
     for i in range(weeks):
         week_start = start + timedelta(weeks=i)
         labels.append(week_start.strftime("%d.%m"))
