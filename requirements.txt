@@ -1,6 +1,6 @@
-gradio
+fastapi
+uvicorn
 pyTelegramBotAPI
 openai
 requests
 groq
-spaces
