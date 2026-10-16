@@ -22,7 +22,7 @@ from voice import transcribe_voice
 logger = logging.getLogger(__name__)
 
 # --- URL вашего Space ---
-SPACE_URL = "https://skienbear-ai-running-coach.hf.space/miniapp"
+SPACE_URL = "https://ai-running-coach-ksyj.onrender.com/"
 
 
 def register_handlers(bot):
