@@ -59,16 +59,54 @@
   <div id="content" class="loading">Загрузка...</div>
 
   <script>
+
     const tg = window.Telegram.WebApp;
+
     tg.ready();
     tg.expand();
 
-    const userId = tg.initDataUnsafe?.user?.id;
+    let userId = null;
+    let authToken = null;
 
-    if (!userId) {
-      document.getElementById('content').innerHTML =
-        '<div class="empty">Открой через Telegram-бота</div>';
+    async function authenticate() {
+      const initData = tg.initData;
+
+      if (!initData) {
+        throw new Error("Открой приложение через Telegram-бота");
+      }
+
+      const response = await fetch("/api/auth/telegram", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          init_data: initData
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error("Не удалось подтвердить авторизацию Telegram");
+      }
+
+      const result = await response.json();
+
+      authToken = result.access_token;
+      userId = result.user_id;
     }
+
+    async function apiFetch(url) {
+      if (!authToken) {
+        throw new Error("Пользователь не авторизован");
+      }
+
+      return fetch(url, {
+        headers: {
+          "Authorization": `Bearer ${authToken}`
+        }
+      });
+    }
+
 
     let currentTab = 'plan';
     let chart = null;
@@ -92,7 +130,7 @@
     }
 
     async function loadPlan(el) {
-      const res = await fetch(`/api/plan/${userId}?days=14`);
+      const res = await apiFetch(`/api/plan/${userId}?days=14`);
       const data = await res.json();
       if (!data.length) {
         el.innerHTML = '<div class="empty">План пуст</div>';
@@ -110,7 +148,7 @@
     }
 
     async function loadDiary(el) {
-      const res = await fetch(`/api/diary/${userId}?limit=30`);
+      const res = await apiFetch(`/api/diary/${userId}?limit=30`);
       const data = await res.json();
       if (!data.length) {
         el.innerHTML = '<div class="empty">Дневник пуст</div>';
@@ -131,7 +169,7 @@
     }
 
     async function loadStats(el) {
-      const res = await fetch(`/api/stats/${userId}`);
+      const res = await apiFetch(`/api/stats/${userId}`);
       const data = await res.json();
 
       el.innerHTML = `
@@ -186,7 +224,21 @@
       });
     }
 
-    if (userId) load();
+    async function startApp() {
+      const content = document.getElementById("content");
+
+      try {
+        await authenticate();
+        await load();
+      } catch (error) {
+        console.error("Mini App error:", error);
+
+        content.textContent =
+          error.message || "Ошибка загрузки приложения";
+      }
+    }
+
+    startApp();
   </script>
 </body>
 </html>
