@@ -7,12 +7,17 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
+# --- База данных (Neon PostgreSQL) ---
+DATABASE_URL = os.environ.get("DATABASE_URL")
+if not DATABASE_URL:
+    raise RuntimeError(
+        "DATABASE_URL не задан. Добавь переменную окружения "
+        "со строкой подключения к Neon PostgreSQL."
+    )
+
 # --- Модели ---
 LLM_MODEL = "openrouter/free"
 WHISPER_MODEL = "whisper-large-v3"
-
-# --- БД ---
-DB_PATH = "training.db"
 
 # --- Клиенты ---
 openrouter_client = OpenAI(

@@ -152,7 +152,7 @@ def api_plan(
             SELECT date, type, distance_km, duration_min,
                    elevation_m, description, status
             FROM plan
-            WHERE user_id = ? AND date >= ? AND date <= ?
+            WHERE user_id = %s AND date >= %s AND date <= %s
             ORDER BY date
         """, (
             authenticated_user_id,
@@ -194,9 +194,9 @@ def api_diary(
         c.execute("""
             SELECT id, date, raw_text, structured_data
             FROM diary
-            WHERE user_id = ?
+            WHERE user_id = %s
             ORDER BY id DESC
-            LIMIT ?
+            LIMIT %s
         """, (authenticated_user_id, limit))
 
         rows = c.fetchall()
@@ -240,7 +240,7 @@ def api_stats(
         c.execute("""
             SELECT date, structured_data
             FROM diary
-            WHERE user_id = ? AND date >= ?
+            WHERE user_id = %s AND date >= %s
             ORDER BY date
         """, (
             authenticated_user_id,
