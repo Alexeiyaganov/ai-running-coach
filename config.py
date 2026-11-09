@@ -25,3 +25,13 @@ openrouter_client = OpenAI(
     api_key=OPENROUTER_API_KEY,
 )
 groq_client = Groq(api_key=GROQ_API_KEY)
+
+# --- Strava ---
+STRAVA_CLIENT_ID = os.environ.get("STRAVA_CLIENT_ID")
+STRAVA_CLIENT_SECRET = os.environ.get("STRAVA_CLIENT_SECRET")
+
+# URL приложения. Лучше задать в Render Environment.
+APP_URL = os.environ.get(
+    "APP_URL",
+    "https://ai-running-coach-ksyj.onrender.com"
+)
