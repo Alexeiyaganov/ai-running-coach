@@ -302,7 +302,7 @@ def register_handlers(bot):
         elif action == "update_plan":
             do_update_plan(message, text, decision.get("target_id"))
         elif action == "answer_question":
-            reply = ask_llm(text, "Ты AI-тренер по бегу, трейлу и ориентированию. Отвечай коротко и по делу.")
+            reply = ask_llm(text, "Ты AI-тренер по бегу, трейлу и ориентированию. Отвечай коротко и по делу.", user_id=message.from_user.id)
             bot.reply_to(message, reply)
         else:
             bot.reply_to(message, "🤔 Не понял. Переформулируй?")
@@ -321,7 +321,7 @@ def register_handlers(bot):
         Сегодня {datetime.now().date().isoformat()}.
         Текст: "{text}"
         """
-        structured = parse_json_safe(ask_llm(prompt, "Ты парсер спортивных данных. Только JSON."))
+        structured = parse_json_safe(ask_llm(prompt, "Ты парсер спортивных данных. Только JSON.", user_id=message.from_user.id))
         if not structured:
             bot.reply_to(message, "😔 Не разобрал тренировку.")
             return
@@ -348,7 +348,7 @@ def register_handlers(bot):
         Верни ТОЛЬКО JSON с полями, которые надо обновить:
         {{"date": ..., "type": ..., "distance_km": ..., "duration_min": ..., "elevation_m": ..., "feeling": ..., "notes": ...}}
         """
-        updated = parse_json_safe(ask_llm(update_prompt, "Только JSON.")) or {}
+        updated = parse_json_safe(ask_llm(update_prompt, "Только JSON.", user_id=message.from_user.id)) or {}
         merged = {k: (updated.get(k) if updated.get(k) is not None else v)
                   for k, v in original.items()}
         save_pending(message.from_user.id, "edit_training",
@@ -382,7 +382,7 @@ def register_handlers(bot):
         Сегодня {datetime.now().date().isoformat()}.
         Запрос: "{text}"
         """
-        raw = ask_llm(prompt, "Ты тренер. Только JSON-массив.")
+        raw = ask_llm(prompt, "Ты тренер. Только JSON-массив.", user_id=message.from_user.id)
         items = parse_json_safe(raw)
         if not items:
             bot.reply_to(message, f"😔 Не разобрал план:\n{raw}")
@@ -403,7 +403,7 @@ def register_handlers(bot):
         Верни ТОЛЬКО JSON с полями для обновления:
         {{"date": "...", "type": "...", "description": "...", "distance_km": ..., "elevation_m": ...}}
         """
-        fields = parse_json_safe(ask_llm(update_prompt, "Только JSON.")) or {}
+        fields = parse_json_safe(ask_llm(update_prompt, "Только JSON.", user_id=message.from_user.id)) or {}
         fields = {k: v for k, v in fields.items() if v is not None}
         if not fields:
             bot.reply_to(message, "😔 Не разобрал правку.")
