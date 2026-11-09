@@ -5,11 +5,24 @@ from config import openrouter_client, LLM_MODEL
 logger = logging.getLogger(__name__)
 
 
-def ask_llm(prompt, system_prompt=None):
+
+def ask_llm(prompt, system_prompt=None, user_id=None):
+    """Запрашивает LLM с проверкой квот."""
+    # Проверяем квоту, если указан user_id
+    if user_id:
+        from subscriptions import sub_manager
+        quota = sub_manager.check_quota(user_id, "llm_call")
+        if not quota["allowed"]:
+            return quota["message"]
+        
+        # Логируем использование
+        sub_manager.log_action(user_id, "llm_call", {"prompt_length": len(prompt)})
+    
     messages = []
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
     messages.append({"role": "user", "content": prompt})
+    
     try:
         response = openrouter_client.chat.completions.create(
             model=LLM_MODEL,

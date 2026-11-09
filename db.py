@@ -96,7 +96,82 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_plan_user_date
         ON plan (user_id, date)
     """)
+        # --- Подписки и тарифы ---
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS subscription_plans (
+            id SERIAL PRIMARY KEY,
+            name TEXT UNIQUE NOT NULL,
+            display_name TEXT,
+            price_monthly_cents INTEGER DEFAULT 0,
+            price_yearly_cents INTEGER DEFAULT 0,
+            max_trainings_per_month INTEGER DEFAULT -1,
+            max_llm_calls_per_day INTEGER DEFAULT -1,
+            max_sources_connected INTEGER DEFAULT 0,
+            auto_sync_enabled BOOLEAN DEFAULT FALSE,
+            features JSONB DEFAULT '{}',
+            is_active BOOLEAN DEFAULT TRUE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
 
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS subscriptions (
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT NOT NULL,
+            plan_id INTEGER NOT NULL REFERENCES subscription_plans(id),
+            started_at TIMESTAMP NOT NULL,
+            expires_at TIMESTAMP NOT NULL,
+            status TEXT DEFAULT 'active',
+            auto_renew BOOLEAN DEFAULT FALSE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+    """)
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS payments (
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT NOT NULL,
+            subscription_id INTEGER,
+            amount_cents INTEGER NOT NULL,
+            currency TEXT DEFAULT 'RUB',
+            payment_method TEXT NOT NULL,
+            status TEXT DEFAULT 'pending',
+            external_id TEXT,
+            metadata JSONB DEFAULT '{}',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+            FOREIGN KEY (subscription_id) REFERENCES subscriptions(id) ON DELETE SET NULL
+        )
+    """)
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS usage_log (
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT NOT NULL,
+            action_type TEXT NOT NULL,
+            metadata JSONB DEFAULT '{}',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+    """)
+
+    # Индексы для производительности
+    c.execute("""
+        CREATE INDEX IF NOT EXISTS idx_subscriptions_user_status 
+        ON subscriptions (user_id, status)
+    """)
+    c.execute("""
+        CREATE INDEX IF NOT EXISTS idx_usage_log_user_action 
+        ON usage_log (user_id, action_type, created_at)
+    """)
+    c.execute("""
+        CREATE INDEX IF NOT EXISTS idx_payments_user 
+        ON payments (user_id, created_at)
+    """)
+
+    # Инициализируем тарифы по умолчанию
+    init_default_plans()
     conn.commit()
     conn.close()
     logger.info("Database schema initialized")
@@ -421,5 +496,317 @@ def get_last_action(user_id):
                 "context": row[2],
             }
         return None
+    finally:
+        conn.close()
+
+# --- Тарифы ---
+def init_default_plans():
+    """Инициализирует тарифы по умолчанию (вызывается один раз при старте)."""
+    conn = get_conn()
+    c = conn.cursor()
+    try:
+        # Проверяем, есть ли уже тарифы
+        c.execute("SELECT COUNT(*) FROM subscription_plans")
+        if c.fetchone()[0] > 0:
+            return
+        
+        plans = [
+            {
+                "name": "free",
+                "display_name": "Бесплатный",
+                "price_monthly_cents": 0,
+                "price_yearly_cents": 0,
+                "max_trainings_per_month": 10,
+                "max_llm_calls_per_day": 5,
+                "max_sources_connected": 0,
+                "auto_sync_enabled": False,
+                "features": json.dumps({
+                    "manual_entry": True,
+                    "voice_input": True,
+                    "diary": True,
+                    "plan": True,
+                    "sync": False,
+                    "analytics": False,
+                }),
+            },
+            {
+                "name": "basic",
+                "display_name": "Базовый",
+                "price_monthly_cents": 29900,  # 299 руб
+                "price_yearly_cents": 299000,  # 2990 руб/год
+                "max_trainings_per_month": -1,  # неограниченно
+                "max_llm_calls_per_day": 100,
+                "max_sources_connected": 1,
+                "auto_sync_enabled": False,
+                "features": json.dumps({
+                    "manual_entry": True,
+                    "voice_input": True,
+                    "diary": True,
+                    "plan": True,
+                    "sync": True,
+                    "analytics": False,
+                }),
+            },
+            {
+                "name": "pro",
+                "display_name": "Про",
+                "price_monthly_cents": 59900,  # 599 руб
+                "price_yearly_cents": 599000,  # 5990 руб/год
+                "max_trainings_per_month": -1,
+                "max_llm_calls_per_day": -1,  # неограниченно
+                "max_sources_connected": 5,
+                "auto_sync_enabled": True,
+                "features": json.dumps({
+                    "manual_entry": True,
+                    "voice_input": True,
+                    "diary": True,
+                    "plan": True,
+                    "sync": True,
+                    "auto_sync": True,
+                    "analytics": True,
+                    "rag": True,
+                    "priority_support": True,
+                }),
+            },
+        ]
+        
+        for plan in plans:
+            c.execute("""
+                INSERT INTO subscription_plans 
+                    (name, display_name, price_monthly_cents, price_yearly_cents,
+                     max_trainings_per_month, max_llm_calls_per_day, 
+                     max_sources_connected, auto_sync_enabled, features)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """, (
+                plan["name"], plan["display_name"], 
+                plan["price_monthly_cents"], plan["price_yearly_cents"],
+                plan["max_trainings_per_month"], plan["max_llm_calls_per_day"],
+                plan["max_sources_connected"], plan["auto_sync_enabled"],
+                plan["features"],
+            ))
+        
+        conn.commit()
+        logger.info("Default subscription plans initialized")
+    finally:
+        conn.close()
+
+
+def get_plan_by_name(plan_name):
+    conn = get_conn()
+    c = conn.cursor()
+    try:
+        c.execute("""
+            SELECT id, name, display_name, price_monthly_cents, price_yearly_cents,
+                   max_trainings_per_month, max_llm_calls_per_day, 
+                   max_sources_connected, auto_sync_enabled, features
+            FROM subscription_plans
+            WHERE name = %s AND is_active = TRUE
+        """, (plan_name,))
+        row = c.fetchone()
+        if row:
+            return {
+                "id": row[0],
+                "name": row[1],
+                "display_name": row[2],
+                "price_monthly_cents": row[3],
+                "price_yearly_cents": row[4],
+                "max_trainings_per_month": row[5],
+                "max_llm_calls_per_day": row[6],
+                "max_sources_connected": row[7],
+                "auto_sync_enabled": row[8],
+                "features": row[9],
+            }
+        return None
+    finally:
+        conn.close()
+
+
+def get_all_plans():
+    conn = get_conn()
+    c = conn.cursor()
+    try:
+        c.execute("""
+            SELECT id, name, display_name, price_monthly_cents, price_yearly_cents,
+                   max_trainings_per_month, max_llm_calls_per_day, 
+                   max_sources_connected, auto_sync_enabled, features
+            FROM subscription_plans
+            WHERE is_active = TRUE
+            ORDER BY price_monthly_cents
+        """)
+        rows = c.fetchall()
+        return [
+            {
+                "id": r[0],
+                "name": r[1],
+                "display_name": r[2],
+                "price_monthly_cents": r[3],
+                "price_yearly_cents": r[4],
+                "max_trainings_per_month": r[5],
+                "max_llm_calls_per_day": r[6],
+                "max_sources_connected": r[7],
+                "auto_sync_enabled": r[8],
+                "features": r[9],
+            }
+            for r in rows
+        ]
+    finally:
+        conn.close()
+
+
+# --- Подписки ---
+def get_user_subscription(user_id):
+    """Получает активную подписку пользователя."""
+    conn = get_conn()
+    c = conn.cursor()
+    try:
+        c.execute("""
+            SELECT s.id, s.plan_id, s.started_at, s.expires_at, s.status, s.auto_renew,
+                   p.name, p.display_name, p.max_trainings_per_month, 
+                   p.max_llm_calls_per_day, p.max_sources_connected, 
+                   p.auto_sync_enabled, p.features
+            FROM subscriptions s
+            JOIN subscription_plans p ON s.plan_id = p.id
+            WHERE s.user_id = %s AND s.status = 'active' 
+                  AND s.expires_at > CURRENT_TIMESTAMP
+            ORDER BY s.expires_at DESC
+            LIMIT 1
+        """, (user_id,))
+        row = c.fetchone()
+        if row:
+            return {
+                "subscription_id": row[0],
+                "plan_id": row[1],
+                "started_at": row[2],
+                "expires_at": row[3],
+                "status": row[4],
+                "auto_renew": row[5],
+                "plan_name": row[6],
+                "plan_display_name": row[7],
+                "max_trainings_per_month": row[8],
+                "max_llm_calls_per_day": row[9],
+                "max_sources_connected": row[10],
+                "auto_sync_enabled": row[11],
+                "features": row[12],
+            }
+        return None
+    finally:
+        conn.close()
+
+
+def create_subscription(user_id, plan_id, duration_days=30):
+    """Создаёт новую подписку."""
+    conn = get_conn()
+    c = conn.cursor()
+    try:
+        started_at = datetime.now()
+        expires_at = started_at + timedelta(days=duration_days)
+        
+        c.execute("""
+            INSERT INTO subscriptions 
+                (user_id, plan_id, started_at, expires_at, status)
+            VALUES (%s, %s, %s, %s, 'active')
+            RETURNING id
+        """, (user_id, plan_id, started_at, expires_at))
+        
+        sub_id = c.fetchone()[0]
+        conn.commit()
+        return sub_id
+    finally:
+        conn.close()
+
+
+def cancel_subscription(user_id):
+    """Отменяет активную подписку."""
+    conn = get_conn()
+    c = conn.cursor()
+    try:
+        c.execute("""
+            UPDATE subscriptions 
+            SET status = 'cancelled', auto_renew = FALSE
+            WHERE user_id = %s AND status = 'active'
+        """, (user_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+# --- Платежи ---
+def create_payment(user_id, subscription_id, amount_cents, currency, 
+                   payment_method, external_id=None, metadata=None):
+    conn = get_conn()
+    c = conn.cursor()
+    try:
+        c.execute("""
+            INSERT INTO payments 
+                (user_id, subscription_id, amount_cents, currency, 
+                 payment_method, status, external_id, metadata)
+            VALUES (%s, %s, %s, %s, %s, 'pending', %s, %s)
+            RETURNING id
+        """, (
+            user_id, subscription_id, amount_cents, currency,
+            payment_method, external_id,
+            json.dumps(metadata or {}, ensure_ascii=False),
+        ))
+        payment_id = c.fetchone()[0]
+        conn.commit()
+        return payment_id
+    finally:
+        conn.close()
+
+
+def update_payment_status(payment_id, status, metadata=None):
+    conn = get_conn()
+    c = conn.cursor()
+    try:
+        if metadata:
+            c.execute("""
+                UPDATE payments 
+                SET status = %s, metadata = metadata || %s::jsonb
+                WHERE id = %s
+            """, (status, json.dumps(metadata, ensure_ascii=False), payment_id))
+        else:
+            c.execute("""
+                UPDATE payments SET status = %s WHERE id = %s
+            """, (status, payment_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+# --- Usage tracking ---
+def log_usage(user_id, action_type, metadata=None):
+    """Логирует использование для отслеживания квот."""
+    conn = get_conn()
+    c = conn.cursor()
+    try:
+        c.execute("""
+            INSERT INTO usage_log (user_id, action_type, metadata)
+            VALUES (%s, %s, %s)
+        """, (
+            user_id, 
+            action_type, 
+            json.dumps(metadata or {}, ensure_ascii=False),
+        ))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_usage_count(user_id, action_type, since=None):
+    """Получает количество действий за период."""
+    conn = get_conn()
+    c = conn.cursor()
+    try:
+        if since:
+            c.execute("""
+                SELECT COUNT(*) FROM usage_log
+                WHERE user_id = %s AND action_type = %s AND created_at >= %s
+            """, (user_id, action_type, since))
+        else:
+            c.execute("""
+                SELECT COUNT(*) FROM usage_log
+                WHERE user_id = %s AND action_type = %s
+            """, (user_id, action_type))
+        return c.fetchone()[0]
     finally:
         conn.close()

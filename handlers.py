@@ -67,6 +67,116 @@ def register_handlers(bot):
             reply_markup=open_app_keyboard(),
         )
 
+
+        # --- Подписка ---
+    @bot.message_handler(commands=["subscribe"])
+    def cmd_subscribe(message):
+        ensure_user(message.from_user.id, message.from_user.first_name)
+        
+        from subscriptions import sub_manager
+        from db import get_all_plans
+        
+        plan = sub_manager.get_user_plan(message.from_user.id)
+        plans = get_all_plans()
+        
+        # Показываем текущий план
+        text = f"📊 *Ваш текущий план*: {plan['plan_display_name']}\n\n"
+        
+        if plan.get("expires_at"):
+            expires = plan["expires_at"].strftime("%d.%m.%Y")
+            text += f"⏰ Действует до: {expires}\n\n"
+        
+        text += "*Доступные тарифы:*\n\n"
+        
+        kb = InlineKeyboardMarkup()
+        
+        for p in plans:
+            if p["name"] == "free":
+                continue
+            
+            price_monthly = p["price_monthly_cents"] / 100
+            price_yearly = p["price_yearly_cents"] / 100
+            
+            text += f"*{p['display_name']}*\n"
+            text += f"💰 {price_monthly:.0f}₽/мес или {price_yearly:.0f}₽/год\n"
+            
+            # Показываем лимиты
+            if p["max_trainings_per_month"] == -1:
+                text += "✅ Неограниченные тренировки\n"
+            else:
+                text += f"✅ {p['max_trainings_per_month']} тренировок/мес\n"
+            
+            if p["max_llm_calls_per_day"] == -1:
+                text += "✅ Неограниченные AI-запросы\n"
+            else:
+                text += f"✅ {p['max_llm_calls_per_day']} AI-запросов/день\n"
+            
+            if p["max_sources_connected"] > 0:
+                text += f"✅ Подключение {p['max_sources_connected']} источников\n"
+            
+            if p["auto_sync_enabled"]:
+                text += "✅ Автоматическая синхронизация\n"
+            
+            text += "\n"
+            
+            # Кнопки
+            kb.row(
+                InlineKeyboardButton(
+                    f"💳 {p['display_name']} — {price_monthly:.0f}₽/мес",
+                    callback_data=f"buy_{p['name']}_monthly",
+                )
+            )
+            kb.row(
+                InlineKeyboardButton(
+                    f"💳 {p['display_name']} — {price_yearly:.0f}₽/год",
+                    callback_data=f"buy_{p['name']}_yearly",
+                )
+            )
+        
+        bot.reply_to(message, text, parse_mode="Markdown", reply_markup=kb)
+
+
+    @bot.message_handler(commands=["status"])
+    def cmd_status(message):
+        ensure_user(message.from_user.id, message.from_user.first_name)
+        
+        from subscriptions import sub_manager
+        from db import get_usage_count
+        
+        user_id = message.from_user.id
+        plan = sub_manager.get_user_plan(user_id)
+        
+        text = f"📊 *Ваш статус*\n\n"
+        text += f"*План*: {plan['plan_display_name']}\n"
+        
+        if plan.get("expires_at"):
+            expires = plan["expires_at"].strftime("%d.%m.%Y %H:%M")
+            text += f"*Действует до*: {expires}\n"
+        
+        # Показываем использование
+        from datetime import datetime, timedelta
+        
+        # LLM за сегодня
+        since_24h = datetime.now() - timedelta(days=1)
+        llm_used = get_usage_count(user_id, "llm_call", since_24h)
+        llm_limit = plan.get("max_llm_calls_per_day", -1)
+        if llm_limit == -1:
+            text += f"\n🤖 *AI-запросы*: {llm_used} (неограниченно)\n"
+        else:
+            text += f"\n🤖 *AI-запросы*: {llm_used}/{llm_limit}\n"
+        
+        # Тренировки за месяц
+        now = datetime.now()
+        since_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        trainings_used = get_usage_count(user_id, "training_created", since_month)
+        trainings_limit = plan.get("max_trainings_per_month", -1)
+        if trainings_limit == -1:
+            text += f"🏃 *Тренировки*: {trainings_used} (неограниченно)\n"
+        else:
+            text += f"🏃 *Тренировки*: {trainings_used}/{trainings_limit}\n"
+        
+        bot.reply_to(message, text, parse_mode="Markdown")
+
     # --- /today /week /month /diary (текстовые сводки) ---
     @bot.message_handler(commands=["today"])
     def cmd_today(message):
