@@ -169,9 +169,116 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_payments_user 
         ON payments (user_id, created_at)
     """)
+        # --- Расширяем diary для внешних источников и видов спорта ---
+    c.execute("""
+        ALTER TABLE diary
+        ADD COLUMN IF NOT EXISTS source TEXT DEFAULT 'manual'
+    """)
+
+    c.execute("""
+        ALTER TABLE diary
+        ADD COLUMN IF NOT EXISTS external_id TEXT
+    """)
+
+    c.execute("""
+        ALTER TABLE diary
+        ADD COLUMN IF NOT EXISTS sport TEXT DEFAULT 'running'
+    """)
+
+    c.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_diary_user_source_external
+        ON diary (user_id, source, external_id)
+        WHERE external_id IS NOT NULL
+    """)
+
+    c.execute("""
+        CREATE INDEX IF NOT EXISTS idx_diary_user_sport_date
+        ON diary (user_id, sport, date)
+    """)
+
+    # --- Справочник видов спорта ---
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS sports (
+            code TEXT PRIMARY KEY,
+            name_ru TEXT NOT NULL,
+            name_en TEXT NOT NULL,
+            is_active BOOLEAN DEFAULT TRUE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # --- Выбранные пользователем виды спорта ---
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS user_sports (
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT NOT NULL,
+            sport_code TEXT NOT NULL REFERENCES sports(code),
+            is_primary BOOLEAN DEFAULT FALSE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(user_id, sport_code)
+        )
+    """)
+
+    # --- OAuth-токены источников: Strava, Garmin, Coros и т.д. ---
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS oauth_tokens (
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT NOT NULL,
+            provider TEXT NOT NULL,
+            access_token TEXT NOT NULL,
+            refresh_token TEXT,
+            expires_at TIMESTAMP,
+            athlete_id TEXT,
+            scope TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(user_id, provider)
+        )
+    """)
+
+    # --- OAuth state для защиты авторизации ---
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS oauth_states (
+            state TEXT PRIMARY KEY,
+            user_id BIGINT NOT NULL,
+            provider TEXT NOT NULL,
+            expires_at TIMESTAMP NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    c.execute("""
+        CREATE INDEX IF NOT EXISTS idx_oauth_tokens_user_provider
+        ON oauth_tokens (user_id, provider)
+    """)
+
+    c.execute("""
+        CREATE INDEX IF NOT EXISTS idx_oauth_states_expires
+        ON oauth_states (expires_at)
+    """)
 
     # Инициализируем тарифы по умолчанию
     init_default_plans()
+        # --- Наполняем справочник видов спорта ---
+    default_sports = [
+        ("running", "Бег", "Running"),
+        ("trail_running", "Трейлраннинг", "Trail Running"),
+        ("cycling", "Велосипед", "Cycling"),
+        ("swimming", "Плавание", "Swimming"),
+        ("strength", "Силовые", "Strength Training"),
+        ("hiking", "Хайкинг", "Hiking"),
+        ("walking", "Ходьба", "Walking"),
+        ("skiing", "Лыжи", "Skiing"),
+        ("orienteering", "Ориентирование", "Orienteering"),
+        ("fitness", "Фитнес", "Fitness"),
+    ]
+
+    for code, name_ru, name_en in default_sports:
+        c.execute("""
+            INSERT INTO sports (code, name_ru, name_en)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (code) DO NOTHING
+        """, (code, name_ru, name_en))
     conn.commit()
     conn.close()
     logger.info("Database schema initialized")
@@ -808,5 +915,255 @@ def get_usage_count(user_id, action_type, since=None):
                 WHERE user_id = %s AND action_type = %s
             """, (user_id, action_type))
         return c.fetchone()[0]
+    finally:
+        conn.close()
+
+# --- Виды спорта ---
+def get_sports():
+    conn = get_conn()
+    c = conn.cursor()
+    try:
+        c.execute("""
+            SELECT code, name_ru, name_en
+            FROM sports
+            WHERE is_active = TRUE
+            ORDER BY name_ru
+        """)
+        rows = c.fetchall()
+        return [
+            {
+                "code": r[0],
+                "name_ru": r[1],
+                "name_en": r[2],
+            }
+            for r in rows
+        ]
+    finally:
+        conn.close()
+
+
+def set_user_sports(user_id, sport_codes, primary_sport=None):
+    conn = get_conn()
+    c = conn.cursor()
+    try:
+        c.execute("DELETE FROM user_sports WHERE user_id = %s", (user_id,))
+
+        for code in sport_codes:
+            c.execute("""
+                INSERT INTO user_sports (user_id, sport_code, is_primary)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (user_id, sport_code) DO UPDATE SET
+                    is_primary = EXCLUDED.is_primary
+            """, (
+                user_id,
+                code,
+                code == primary_sport,
+            ))
+
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_user_sports(user_id):
+    conn = get_conn()
+    c = conn.cursor()
+    try:
+        c.execute("""
+            SELECT s.code, s.name_ru, s.name_en, us.is_primary
+            FROM user_sports us
+            JOIN sports s ON s.code = us.sport_code
+            WHERE us.user_id = %s
+            ORDER BY us.is_primary DESC, s.name_ru
+        """, (user_id,))
+        rows = c.fetchall()
+        return [
+            {
+                "code": r[0],
+                "name_ru": r[1],
+                "name_en": r[2],
+                "is_primary": r[3],
+            }
+            for r in rows
+        ]
+    finally:
+        conn.close()
+
+
+# --- OAuth state ---
+def create_oauth_state(user_id, provider, ttl_minutes=15):
+    import secrets
+
+    state = secrets.token_urlsafe(32)
+    expires_at = datetime.now() + timedelta(minutes=ttl_minutes)
+
+    conn = get_conn()
+    c = conn.cursor()
+    try:
+        c.execute("""
+            INSERT INTO oauth_states (state, user_id, provider, expires_at)
+            VALUES (%s, %s, %s, %s)
+        """, (state, user_id, provider, expires_at))
+        conn.commit()
+        return state
+    finally:
+        conn.close()
+
+
+def pop_oauth_state(state, provider):
+    conn = get_conn()
+    c = conn.cursor()
+    try:
+        c.execute("""
+            SELECT user_id
+            FROM oauth_states
+            WHERE state = %s
+              AND provider = %s
+              AND expires_at > CURRENT_TIMESTAMP
+        """, (state, provider))
+        row = c.fetchone()
+
+        c.execute("DELETE FROM oauth_states WHERE state = %s", (state,))
+        conn.commit()
+
+        return row[0] if row else None
+    finally:
+        conn.close()
+
+
+# --- OAuth tokens ---
+def save_oauth_token(
+    user_id,
+    provider,
+    access_token,
+    refresh_token=None,
+    expires_at=None,
+    athlete_id=None,
+    scope=None,
+):
+    conn = get_conn()
+    c = conn.cursor()
+    try:
+        c.execute("""
+            INSERT INTO oauth_tokens
+                (user_id, provider, access_token, refresh_token,
+                 expires_at, athlete_id, scope)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (user_id, provider) DO UPDATE SET
+                access_token = EXCLUDED.access_token,
+                refresh_token = EXCLUDED.refresh_token,
+                expires_at = EXCLUDED.expires_at,
+                athlete_id = EXCLUDED.athlete_id,
+                scope = EXCLUDED.scope,
+                updated_at = CURRENT_TIMESTAMP
+        """, (
+            user_id,
+            provider,
+            access_token,
+            refresh_token,
+            expires_at,
+            athlete_id,
+            scope,
+        ))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_oauth_token(user_id, provider):
+    conn = get_conn()
+    c = conn.cursor()
+    try:
+        c.execute("""
+            SELECT access_token, refresh_token, expires_at, athlete_id, scope
+            FROM oauth_tokens
+            WHERE user_id = %s AND provider = %s
+        """, (user_id, provider))
+        row = c.fetchone()
+
+        if not row:
+            return None
+
+        return {
+            "access_token": row[0],
+            "refresh_token": row[1],
+            "expires_at": row[2],
+            "athlete_id": row[3],
+            "scope": row[4],
+        }
+    finally:
+        conn.close()
+
+
+def delete_oauth_token(user_id, provider):
+    conn = get_conn()
+    c = conn.cursor()
+    try:
+        c.execute("""
+            DELETE FROM oauth_tokens
+            WHERE user_id = %s AND provider = %s
+        """, (user_id, provider))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+# --- Импорт тренировок ---
+def save_imported_activity(user_id, provider, external_id, sport, structured, raw_text):
+    """
+    Сохраняет импортную тренировку в diary.
+    Если такая тренировка уже есть — обновляет её.
+    Возвращает: created / updated.
+    """
+    conn = get_conn()
+    c = conn.cursor()
+    try:
+        date = structured.get("date") or datetime.now().date().isoformat()
+
+        c.execute("""
+            SELECT id
+            FROM diary
+            WHERE user_id = %s
+              AND source = %s
+              AND external_id = %s
+        """, (user_id, provider, external_id))
+
+        existing = c.fetchone()
+
+        if existing:
+            record_id = existing[0]
+            c.execute("""
+                UPDATE diary
+                SET date = %s,
+                    raw_text = %s,
+                    structured_data = %s,
+                    sport = %s
+                WHERE id = %s AND user_id = %s
+            """, (
+                date,
+                raw_text,
+                json.dumps(structured, ensure_ascii=False),
+                sport,
+                record_id,
+                user_id,
+            ))
+            conn.commit()
+            return "updated"
+
+        c.execute("""
+            INSERT INTO diary
+                (user_id, date, raw_text, structured_data, source, external_id, sport)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+        """, (
+            user_id,
+            date,
+            raw_text,
+            json.dumps(structured, ensure_ascii=False),
+            provider,
+            external_id,
+            sport,
+        ))
+        conn.commit()
+        return "created"
     finally:
         conn.close()
