@@ -309,6 +309,12 @@ def register_handlers(bot):
 
     # --- Действия ---
     def do_create_diary(message, text):
+        # Проверяем квоту на создание тренировок
+        from subscriptions import sub_manager
+        quota = sub_manager.check_quota(message.from_user.id, "training_created")
+        if not quota["allowed"]:
+            bot.reply_to(message, f"❌ {quota['message']}")
+            return
         prompt = f"""
         Извлеки информацию о тренировке, верни ТОЛЬКО JSON:
         {{"date": "YYYY-MM-DD или null", "type": "тип или null", "distance_km": число или null, "duration_min": число или null, "elevation_m": число или null, "feeling": "оценка или null", "notes": "заметки или null"}}
@@ -322,6 +328,8 @@ def register_handlers(bot):
         save_pending(message.from_user.id, "log_training",
                      {"structured": structured, "raw_text": text})
         preview = json.dumps(structured, ensure_ascii=False, indent=2)
+        # Логируем использование
+        sub_manager.log_action(message.from_user.id, "training_created")
         bot.reply_to(message, f"📝 Новая тренировка:\n{preview}\n\nЗаписать?",
                      reply_markup=confirmation_keyboard())
 
